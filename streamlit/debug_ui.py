@@ -110,7 +110,7 @@ def display_response(
         status_code: HTTP status code
         data: Response data
         request_info: Optional dict with {method, endpoint, json_data, params}
-                     for retry with auth
+                     for retry with auth (stored in session state for later)
     """
     if status_code == 0:
         st.error(f"❌ Connection Error")
@@ -118,6 +118,9 @@ def display_response(
     elif 200 <= status_code < 300:
         st.success(f"✅ Success (HTTP {status_code})")
         st.json(data)
+        # Clear any pending auth request on success
+        if "pending_auth_request" in st.session_state:
+            st.session_state.pending_auth_request = None
     elif status_code == 404:
         st.warning(f"⚠️ Not Found (HTTP 404)")
         display_error_details(data)
@@ -134,52 +137,13 @@ def display_response(
         st.error(f"🔒 Entity is Locked (HTTP 423)")
         display_error_details(data)
         
-        # Show password input for retry
+        # Store request info for retry (handled outside form)
         if request_info:
-            display_auth_retry(request_info)
+            st.session_state.pending_auth_request = request_info
+            st.info("⬇️ Scroll down to authenticate and retry this request.")
     else:
         st.error(f"❌ Error (HTTP {status_code})")
         display_error_details(data)
-
-
-def display_auth_retry(request_info: dict):
-    """
-    Display password input for retrying a locked entity operation.
-    
-    This allows authenticated access without permanently unlocking the entity.
-    """
-    st.markdown("---")
-    st.markdown("### 🔐 Authenticate to Access Locked Entity")
-    st.markdown("Enter password to retry with authentication. "
-                "This does NOT unlock the entity - it provides temporary access.")
-    
-    # Use a unique key based on the request
-    key = f"auth_{request_info.get('endpoint', '')}_{hash(str(request_info))}"
-    
-    password = st.text_input(
-        "Password",
-        type="password",
-        key=f"pwd_{key}",
-        help="Enter 'homememory' for demo purposes",
-    )
-    
-    if st.button("Retry with Authentication", key=f"btn_{key}"):
-        if password:
-            status, data = api_request(
-                method=request_info.get("method", "POST"),
-                endpoint=request_info.get("endpoint", ""),
-                json_data=request_info.get("json_data"),
-                params=request_info.get("params"),
-                auth_password=password,
-            )
-            # Display the result (without retry option to avoid infinite loop)
-            if status == 423:
-                st.error("❌ Authentication failed or insufficient permissions")
-                display_error_details(data)
-            else:
-                display_response(status, data)  # No request_info = no retry
-        else:
-            st.warning("Please enter a password")
 
 
 def display_error_details(data: dict):
@@ -292,6 +256,8 @@ tabs = st.tabs([
     "10. Find Item",
     "11. View Children",
     "12. Tree View",
+    "13. Upload Image",
+    "14. View Images",
 ])
 
 
@@ -696,4 +662,310 @@ with tabs[11]:
                 
                 st.markdown("---")
                 st.caption("🔒 = Locked | [L1]/[L2] = Security Level")
+
+
+# -----------------------------------------------------------------------------
+# Tab 13: Upload Image
+# -----------------------------------------------------------------------------
+
+with tabs[12]:
+    st.header("Upload Image")
+    st.markdown("Attach an image to a container or item.")
+    st.caption("If entity is locked, you'll be prompted for authentication.")
+    
+    with st.form("upload_image_form"):
+        entity_type = st.selectbox(
+            "Entity Type",
+            options=["container", "item"],
+            key="upload_entity_type",
+        )
+        
+        # User-friendly input: path for containers, name for items
+        entity_identifier = st.text_input(
+            "Container Path or Item Name",
+            placeholder="e.g., 'master bedroom, closet' for container OR 'passport' for item",
+            help="For containers: comma-separated path. For items: just the item name.",
+        )
+        
+        uploaded_file = st.file_uploader(
+            "Choose an image",
+            type=["jpg", "jpeg", "png", "gif", "webp"],
+            key="image_upload",
+        )
+        
+        description = st.text_input("Description (optional)", placeholder="Front view of the drawer")
+        is_primary = st.checkbox("Set as primary image", value=False)
+        
+        submitted = st.form_submit_button("Upload Image")
+        
+        if submitted:
+            if not entity_identifier:
+                st.error("Container path or item name is required")
+            elif not uploaded_file:
+                st.error("Please select an image file")
+            else:
+                # First, resolve the identifier to get the UUID
+                entity_id = None
+                
+                if entity_type == "container":
+                    # Resolve container path to get UUID
+                    path_parts = parse_path(entity_identifier)
+                    resolve_status, resolve_data = api_request(
+                        "POST", "/containers/resolve", {"path": path_parts}
+                    )
+                    if resolve_status == 200:
+                        entity_id = resolve_data.get("id")
+                        st.info(f"Resolved container: {resolve_data.get('display_name', resolve_data.get('name'))} (ID: {entity_id[:8]}...)")
+                    else:
+                        st.error("❌ Could not resolve container path")
+                        display_error_details(resolve_data)
+                else:
+                    # Find item by name to get UUID
+                    resolve_status, resolve_data = api_request(
+                        "GET", "/items/resolve", params={"name": entity_identifier.strip()}
+                    )
+                    if resolve_status == 200:
+                        entity_id = resolve_data.get("id")
+                        st.info(f"Resolved item: {resolve_data.get('display_name', resolve_data.get('name'))} (ID: {entity_id[:8]}...)")
+                    else:
+                        st.error("❌ Could not resolve item")
+                        display_error_details(resolve_data)
+                
+                if entity_id:
+                    # Now upload the image with the resolved UUID
+                    try:
+                        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                        form_data = {
+                            "entity_type": entity_type,
+                            "entity_id": entity_id,
+                            "is_primary": str(is_primary).lower(),
+                        }
+                        if description:
+                            form_data["description"] = description
+                        
+                        import requests
+                        response = requests.post(
+                            f"{API_BASE_URL}/images/upload",
+                            files=files,
+                            data=form_data,
+                            timeout=30,
+                        )
+                        
+                        if response.status_code == 201:
+                            st.success("✅ Image uploaded successfully!")
+                            st.json(response.json())
+                        elif response.status_code == 423:
+                            st.error("🔒 Entity is Locked (HTTP 423)")
+                            try:
+                                display_error_details(response.json())
+                            except:
+                                st.text(response.text)
+                            st.warning("Unlock the entity or use auth to upload images.")
+                        else:
+                            st.error(f"❌ Error (HTTP {response.status_code})")
+                            try:
+                                display_error_details(response.json())
+                            except:
+                                st.text(response.text)
+                    except Exception as e:
+                        st.error(f"❌ Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# Tab 14: View Images
+# -----------------------------------------------------------------------------
+
+with tabs[13]:
+    st.header("View Images")
+    st.markdown("View images attached to a container or item.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        view_entity_type = st.selectbox(
+            "Entity Type",
+            options=["container", "item"],
+            key="view_entity_type",
+        )
+    
+    with col2:
+        view_entity_identifier = st.text_input(
+            "Container Path or Item Name",
+            placeholder="e.g., 'master bedroom, closet' or 'passport'",
+            key="view_entity_identifier",
+        )
+    
+    if st.button("Load Images", key="load_images"):
+        if not view_entity_identifier:
+            st.error("Container path or item name is required")
+        else:
+            # Resolve identifier to UUID
+            view_entity_id = None
+            
+            if view_entity_type == "container":
+                path_parts = parse_path(view_entity_identifier)
+                resolve_status, resolve_data = api_request(
+                    "POST", "/containers/resolve", {"path": path_parts}
+                )
+                if resolve_status == 200:
+                    view_entity_id = resolve_data.get("id")
+                    st.info(f"📁 {resolve_data.get('display_name', resolve_data.get('name'))} ({resolve_data.get('path')})")
+                else:
+                    st.error("❌ Could not resolve container path")
+                    display_error_details(resolve_data)
+            else:
+                resolve_status, resolve_data = api_request(
+                    "GET", "/items/resolve", params={"name": view_entity_identifier.strip()}
+                )
+                if resolve_status == 200:
+                    view_entity_id = resolve_data.get("id")
+                    st.info(f"📦 {resolve_data.get('display_name', resolve_data.get('name'))} ({resolve_data.get('path')})")
+                else:
+                    st.error("❌ Could not resolve item")
+                    display_error_details(resolve_data)
+            
+            if not view_entity_id:
+                st.stop()
+            
+            status, data = api_request(
+                "GET",
+                f"/images/entity/{view_entity_type}/{view_entity_id}",
+            )
+            
+            if status == 200:
+                images = data.get("images", [])
+                primary_id = data.get("primary_id")
+                
+                if not images:
+                    st.info("No images found for this entity.")
+                else:
+                    st.success(f"Found {len(images)} image(s)")
+                    
+                    # Display primary image large
+                    primary_image = next((img for img in images if img.get("is_primary")), None)
+                    
+                    if primary_image:
+                        st.markdown("### Primary Image")
+                        st.image(
+                            f"{API_BASE_URL}{primary_image['url']}",
+                            caption=primary_image.get("description") or primary_image.get("filename"),
+                            use_container_width=True,
+                        )
+                        st.caption(f"ID: `{primary_image['id']}` | Size: {primary_image.get('file_size', 'unknown')} bytes")
+                    
+                    # Display all images as thumbnails
+                    st.markdown("### All Images")
+                    
+                    cols = st.columns(3)
+                    for idx, img in enumerate(images):
+                        with cols[idx % 3]:
+                            is_primary = img.get("is_primary", False)
+                            caption = f"{'⭐ ' if is_primary else ''}{img.get('filename', 'Unknown')}"
+                            
+                            st.image(
+                                f"{API_BASE_URL}{img['url']}",
+                                caption=caption,
+                                use_container_width=True,
+                            )
+                            st.caption(f"ID: `{img['id']}`")
+                            
+                            if img.get("description"):
+                                st.caption(img["description"])
+                            
+                            # Set as primary button
+                            if not is_primary:
+                                if st.button(f"Set Primary", key=f"primary_{img['id']}"):
+                                    set_status, set_data = api_request(
+                                        "POST",
+                                        "/images/primary",
+                                        {
+                                            "entity_type": view_entity_type,
+                                            "entity_id": view_entity_id,
+                                            "image_id": img["id"],
+                                        },
+                                    )
+                                    if set_status == 200:
+                                        st.success("Set as primary!")
+                                        st.rerun()
+                                    else:
+                                        display_error_details(set_data)
+                            
+                            # Delete button
+                            if st.button(f"🗑️ Delete", key=f"delete_{img['id']}"):
+                                del_status, del_data = api_request(
+                                    "POST",
+                                    "/images/delete",
+                                    {"image_id": img["id"]},
+                                )
+                                if del_status == 204:
+                                    st.success("Image deleted!")
+                                    st.rerun()
+                                else:
+                                    display_error_details(del_data)
+            else:
+                display_response(status, data)
+
+
+# -----------------------------------------------------------------------------
+# Auth Retry Section (Outside all forms)
+# -----------------------------------------------------------------------------
+
+if st.session_state.pending_auth_request is not None:
+    st.markdown("---")
+    st.markdown("## 🔐 Authenticate to Access Locked Entity")
+    st.markdown("The previous operation was blocked because the entity is locked. "
+                "Enter password to retry with authentication.")
+    st.markdown("*This does NOT unlock the entity - it provides temporary access for this request only.*")
+    
+    request_info = st.session_state.pending_auth_request
+    
+    st.markdown(f"**Pending request:** `{request_info.get('method', 'POST')} {request_info.get('endpoint', '')}`")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        auth_password = st.text_input(
+            "Password",
+            type="password",
+            key="auth_retry_password",
+            help="Enter 'homememory' for demo purposes",
+        )
+    
+    with col2:
+        st.write("")  # Spacing
+        st.write("")  # Spacing
+        retry_clicked = st.button("🔓 Retry with Auth", key="auth_retry_button")
+    
+    cancel_clicked = st.button("❌ Cancel", key="auth_cancel_button")
+    
+    if retry_clicked:
+        if auth_password:
+            status, data = api_request(
+                method=request_info.get("method", "POST"),
+                endpoint=request_info.get("endpoint", ""),
+                json_data=request_info.get("json_data"),
+                params=request_info.get("params"),
+                auth_password=auth_password,
+            )
+            
+            # Clear pending request since we've now retried
+            st.session_state.pending_auth_request = None
+            
+            # Display the result
+            st.markdown("### Retry Result")
+            if status == 423:
+                st.error("❌ Authentication failed or insufficient permissions")
+                display_error_details(data)
+            elif 200 <= status < 300:
+                st.success(f"✅ Success (HTTP {status})")
+                st.json(data)
+            else:
+                st.warning(f"⚠️ Request completed with status {status}")
+                display_error_details(data)
+        else:
+            st.warning("Please enter a password")
+    
+    if cancel_clicked:
+        st.session_state.pending_auth_request = None
+        st.rerun()
 

@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.db.engine import create_tables
 from app.api.containers import router as containers_router
 from app.api.items import router as items_router
+from app.api.images import router as images_router
 
 
 @asynccontextmanager
@@ -56,6 +57,7 @@ app.add_middleware(
 # Include routers
 app.include_router(containers_router)
 app.include_router(items_router)
+app.include_router(images_router)
 
 
 # -----------------------------------------------------------------------------

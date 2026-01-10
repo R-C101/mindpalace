@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import Container, Item, EntityType, SecurityLevel, to_canonical_name
+from app.db.models import Container, Item, Image, EntityImage, EntityType, SecurityLevel, to_canonical_name
 from app.core.resolver import (
     resolve_container_path,
     resolve_item_by_name,
@@ -910,4 +910,318 @@ def unlock_entity(
     session.refresh(entity)
     
     return entity
+
+
+# -----------------------------------------------------------------------------
+# Image Exception Classes
+# -----------------------------------------------------------------------------
+
+@dataclass
+class ImageNotFoundError(Exception):
+    """
+    Raised when an image is not found.
+    """
+    image_id: str
+    
+    def __str__(self) -> str:
+        return f"Image with ID '{self.image_id}' not found"
+
+
+@dataclass
+class ImageNotLinkedError(Exception):
+    """
+    Raised when an image is not linked to an entity.
+    """
+    image_id: str
+    entity_type: str
+    entity_id: str
+    
+    def __str__(self) -> str:
+        return f"Image '{self.image_id}' is not linked to {self.entity_type} '{self.entity_id}'"
+
+
+@dataclass
+class EntityNotFoundByIdError(Exception):
+    """
+    Raised when an entity cannot be found by its ID.
+    """
+    entity_type: str
+    entity_id: str
+    
+    def __str__(self) -> str:
+        return f"{self.entity_type} with ID '{self.entity_id}' not found"
+
+
+# -----------------------------------------------------------------------------
+# Image Operations
+# -----------------------------------------------------------------------------
+
+def add_image_to_entity(
+    session: Session,
+    entity_type: EntityType,
+    entity_id: str,
+    file_path: str,
+    filename: str,
+    mime_type: Optional[str] = None,
+    file_size: Optional[int] = None,
+    description: Optional[str] = None,
+    is_primary: bool = False,
+    auth_context: Optional[AuthContext] = None,
+) -> Image:
+    """
+    Add an image to a container or item.
+    
+    Creates an Image record and links it to the entity via EntityImage.
+    
+    Args:
+        session: SQLAlchemy session
+        entity_type: EntityType.CONTAINER or EntityType.ITEM
+        entity_id: ID of the container or item
+        file_path: Path to the image file on disk
+        filename: Original filename
+        mime_type: MIME type (image/jpeg, image/png, etc.)
+        file_size: File size in bytes
+        description: Optional description or caption
+        is_primary: If True, set as primary image (unsets others)
+        auth_context: Optional auth context for locked entities
+        
+    Returns:
+        The created Image instance
+        
+    Raises:
+        EntityNotFoundByIdError: If entity doesn't exist
+        EntityLockedError: If entity is locked and auth is insufficient
+    """
+    # Resolve and check entity by ID
+    if entity_type == EntityType.CONTAINER:
+        entity = session.query(Container).filter(Container.id == entity_id).first()
+        if not entity:
+            raise EntityNotFoundByIdError(
+                entity_type="Container",
+                entity_id=entity_id,
+            )
+    else:
+        entity = session.query(Item).filter(Item.id == entity_id).first()
+        if not entity:
+            raise EntityNotFoundByIdError(
+                entity_type="Item",
+                entity_id=entity_id,
+            )
+    
+    # Check entity is not locked (or auth allows)
+    _check_not_locked(entity, auth_context)
+    
+    # If setting as primary, unset existing primary images for this entity
+    if is_primary:
+        existing_links = session.query(EntityImage).filter(
+            EntityImage.entity_type == entity_type.value,
+            EntityImage.entity_id == entity_id,
+            EntityImage.is_primary == True,
+        ).all()
+        for link in existing_links:
+            link.is_primary = False
+    
+    # Get next display order
+    max_order = session.query(EntityImage.display_order).filter(
+        EntityImage.entity_type == entity_type.value,
+        EntityImage.entity_id == entity_id,
+    ).order_by(EntityImage.display_order.desc()).first()
+    
+    next_order = (max_order[0] + 1) if max_order else 0
+    
+    # Create Image record
+    image = Image(
+        file_path=file_path,
+        filename=filename,
+        mime_type=mime_type,
+        file_size=file_size,
+        description=description,
+    )
+    session.add(image)
+    session.flush()  # Get the image ID
+    
+    # Create EntityImage link
+    entity_image = EntityImage(
+        entity_type=entity_type.value,
+        entity_id=entity_id,
+        image_id=image.id,
+        display_order=next_order,
+        is_primary=is_primary,
+    )
+    session.add(entity_image)
+    
+    session.commit()
+    session.refresh(image)
+    
+    return image
+
+
+def remove_image(
+    session: Session,
+    image_id: str,
+    auth_context: Optional[AuthContext] = None,
+) -> None:
+    """
+    Remove an image and all its entity links.
+    
+    Args:
+        session: SQLAlchemy session
+        image_id: ID of the image to remove
+        auth_context: Optional auth context for locked entities
+        
+    Raises:
+        ImageNotFoundError: If image doesn't exist
+        EntityLockedError: If any linked entity is locked and auth is insufficient
+    """
+    # Find the image
+    image = session.query(Image).filter(Image.id == image_id).first()
+    if not image:
+        raise ImageNotFoundError(image_id=image_id)
+    
+    # Check all linked entities for locks
+    for entity_image in image.entity_images:
+        if entity_image.entity_type == EntityType.CONTAINER.value:
+            entity = session.query(Container).filter(
+                Container.id == entity_image.entity_id
+            ).first()
+        else:
+            entity = session.query(Item).filter(
+                Item.id == entity_image.entity_id
+            ).first()
+        
+        if entity:
+            _check_not_locked(entity, auth_context)
+    
+    # Delete image (cascades to entity_images)
+    session.delete(image)
+    session.commit()
+
+
+def set_primary_image(
+    session: Session,
+    entity_type: EntityType,
+    entity_id: str,
+    image_id: str,
+    auth_context: Optional[AuthContext] = None,
+) -> EntityImage:
+    """
+    Set an image as the primary image for an entity.
+    
+    Unsets any existing primary image for that entity.
+    
+    Args:
+        session: SQLAlchemy session
+        entity_type: EntityType.CONTAINER or EntityType.ITEM
+        entity_id: ID of the container or item
+        image_id: ID of the image to set as primary
+        auth_context: Optional auth context for locked entities
+        
+    Returns:
+        The updated EntityImage link
+        
+    Raises:
+        EntityNotFoundByIdError: If entity doesn't exist
+        ImageNotLinkedError: If image is not linked to entity
+        EntityLockedError: If entity is locked and auth is insufficient
+    """
+    # Resolve and check entity by ID
+    if entity_type == EntityType.CONTAINER:
+        entity = session.query(Container).filter(Container.id == entity_id).first()
+        if not entity:
+            raise EntityNotFoundByIdError(
+                entity_type="Container",
+                entity_id=entity_id,
+            )
+    else:
+        entity = session.query(Item).filter(Item.id == entity_id).first()
+        if not entity:
+            raise EntityNotFoundByIdError(
+                entity_type="Item",
+                entity_id=entity_id,
+            )
+    
+    # Check entity is not locked (or auth allows)
+    _check_not_locked(entity, auth_context)
+    
+    # Find the entity-image link
+    target_link = session.query(EntityImage).filter(
+        EntityImage.entity_type == entity_type.value,
+        EntityImage.entity_id == entity_id,
+        EntityImage.image_id == image_id,
+    ).first()
+    
+    if not target_link:
+        raise ImageNotLinkedError(
+            image_id=image_id,
+            entity_type=entity_type.value,
+            entity_id=entity_id,
+        )
+    
+    # Unset existing primary images
+    existing_primaries = session.query(EntityImage).filter(
+        EntityImage.entity_type == entity_type.value,
+        EntityImage.entity_id == entity_id,
+        EntityImage.is_primary == True,
+        EntityImage.id != target_link.id,
+    ).all()
+    
+    for link in existing_primaries:
+        link.is_primary = False
+    
+    # Set new primary
+    target_link.is_primary = True
+    
+    session.commit()
+    session.refresh(target_link)
+    
+    return target_link
+
+
+def get_entity_images(
+    session: Session,
+    entity_type: EntityType,
+    entity_id: str,
+) -> List[Image]:
+    """
+    Get all images for an entity, ordered by display_order.
+    
+    Args:
+        session: SQLAlchemy session
+        entity_type: EntityType.CONTAINER or EntityType.ITEM
+        entity_id: ID of the container or item
+        
+    Returns:
+        List of Image instances
+    """
+    entity_images = session.query(EntityImage).filter(
+        EntityImage.entity_type == entity_type.value,
+        EntityImage.entity_id == entity_id,
+    ).order_by(EntityImage.display_order).all()
+    
+    return [ei.image for ei in entity_images]
+
+
+def get_primary_image(
+    session: Session,
+    entity_type: EntityType,
+    entity_id: str,
+) -> Optional[Image]:
+    """
+    Get the primary image for an entity.
+    
+    Args:
+        session: SQLAlchemy session
+        entity_type: EntityType.CONTAINER or EntityType.ITEM
+        entity_id: ID of the container or item
+        
+    Returns:
+        Primary Image or None if no primary exists
+    """
+    entity_image = session.query(EntityImage).filter(
+        EntityImage.entity_type == entity_type.value,
+        EntityImage.entity_id == entity_id,
+        EntityImage.is_primary == True,
+    ).first()
+    
+    return entity_image.image if entity_image else None
 
