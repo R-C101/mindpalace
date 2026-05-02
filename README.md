@@ -8,7 +8,7 @@
 
   <p>
     <img src="https://img.shields.io/badge/MCP-stdio-blue?style=flat-square" alt="MCP stdio" />
-    <img src="https://img.shields.io/badge/works%20with-Claude%20%7C%20Cursor%20%7C%20Goose%20%7C%20Zed-blueviolet?style=flat-square" alt="Clients" />
+    <img src="https://img.shields.io/badge/works%20with-Claude%20%7C%20ChatGPT%20%7C%20Cursor%20%7C%20Windsurf-blueviolet?style=flat-square" alt="Clients" />
     <img src="https://img.shields.io/badge/local--first-SQLite-green?style=flat-square" alt="SQLite" />
     <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT" />
   </p>
@@ -57,7 +57,7 @@ claude mcp add mindpalace -- uv --directory $(pwd) run python -m mindpalace serv
 
 Restart your client. MindPalace is live.
 
-> Works with any MCP-capable client: Claude Desktop, Claude Code, Cursor, Continue, Goose, Zed, Cline.
+> Works with any MCP-capable client: Claude Desktop, Claude Code, ChatGPT, Cursor, Windsurf, Cline.
 
 ---
 
