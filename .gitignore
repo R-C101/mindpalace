@@ -8,3 +8,23 @@ wheels/
 
 # Virtual environments
 .venv
+
+# OS noise
+.DS_Store
+
+# Local data — not part of the repo
+data/*.db
+data/*.db-journal
+data/audit.log
+data/backups/
+data/images/
+
+# Local environment files (.env.example IS committed)
+.env
+.env.local
+
+# Reference docs dropped locally
+llms.txt
+
+# Plan file from interactive sessions
+PLAN.md

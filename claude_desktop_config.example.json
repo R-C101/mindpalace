@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mindpalace": {
+      "command": "uv",
+      "args": [
+        "--directory", "/REPLACE/WITH/ABSOLUTE/PATH/TO/mindpalace",
+        "run", "python", "-m", "mindpalace", "serve"
+      ]
+    }
+  }
+}
